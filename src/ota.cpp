@@ -1,10 +1,6 @@
 #include "ota.h"
 #include "ota_credentials.h"
 
-#define hostString "gpstracker"
-#define swname "gpstracker"
-#define swversion 0.0
-
 WiFiClient ota_client;
 
 bool initNetwork() {
@@ -53,7 +49,7 @@ void checkUpdates() {
       }
     }
     Serial.println();
-    String url = "http://"+MDNS.IP(0).toString()+":"+MDNS.port(0)+"/espupdate?n="+swname+"&v="+swversion;
+    String url = "http://"+MDNS.IP(0).toString()+":"+MDNS.port(0)+"/espupdate?n=" SW_NAME "&v=" SW_VERSION;
     Serial.println("Checking firmware update from "+url);
     t_httpUpdate_return ret = ESPhttpUpdate.update(ota_client,url);
     switch (ret) {
@@ -68,6 +64,8 @@ void checkUpdates() {
 void ota_setup() {
   Serial.begin(115200);
   Serial.println();
+  Serial.println();
+  Serial.flush();
   if (initNetwork()) {
     initMDns();
     checkUpdates();

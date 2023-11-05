@@ -1,17 +1,15 @@
 #include <Arduino.h>
 #include <LittleFS.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
-
+#include <WiFiUdp.h>
 #include "customizations.h"
+
+extern void udpBroadcast(const char *);
 
 //#define DEBUG_LOG_FILENAME "LOG.TXT"
 
-extern Adafruit_SSD1306 display;
-
 void log_print(const char *message) {
     Serial.print(message);
-    display.println(message);
+    udpBroadcast(message);
 
 // #if DEBUG_LOG_ENABLED
 //     File file = LittleFS.open(DEBUG_LOG_FILENAME, "a");

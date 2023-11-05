@@ -1,31 +1,27 @@
 #include "main.h"
+#include "ota.h"
 
-void led_on() {
-    digitalWrite(LED_BUILTIN, LOW);
-}
-
-void led_off() {
-    digitalWrite(LED_BUILTIN, HIGH);
-}
+#define led_on() digitalWrite(LED_BUILTIN, LOW);
+#define led_off() digitalWrite(LED_BUILTIN, HIGH);
 
 void listDir(const char * dirname, uint8_t levels) {
-    Serial.printf("Listing directory: %s\r\n", dirname);
+    log_printf("Listing directory: %s\r\n", dirname);
 
     Dir root = LittleFS.openDir(dirname);
     while (root.next()) {
         File file = root.openFile("r");
         if (file.isDirectory()) {
-            Serial.print("  DIR : ");
-            Serial.println(file.name());
+            log_print("  DIR : ");
+            log_println(file.name());
             if(levels) {
                 listDir(file.fullName(), levels - 1);
             }
             file.close();
         } else {
-            Serial.print("  FILE: ");
-            Serial.print(file.name());
-            Serial.print("\t\t\tSIZE: ");
-            Serial.println(file.size());
+            log_print("  FILE: ");
+            log_print(file.name());
+            log_print("\t\t\tSIZE: ");
+            log_printfln("%d",file.size());
         }
     }
 }
@@ -42,10 +38,18 @@ TinyGPSPlus gps;
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 32, &Wire, -1);
 double old_lat;
 double old_lon;
+WiFiUDP udp;
 
 double last_known_lat = ASSISTNOW_START_LAT;
 double last_known_lon = ASSISTNOW_START_LON;
 double last_known_alt = ASSISTNOW_START_ALT;
+
+void udpBroadcast(const char *message) {
+    if (udp.beginPacket(WiFi.broadcastIP(),UDP_BROADCAST_PORT)) {
+        udp.write(message);
+        udp.endPacket();
+    }
+}
 
 void oled_setup() {
     display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
@@ -54,46 +58,49 @@ void oled_setup() {
     display.setTextColor(SSD1306_WHITE); // Draw white text
     display.setCursor(0, 0);     // Start at top-left corner
     display.cp437(true);         // Use full 256 char 'Code Page 437' font
-    display.print("...INIT...");
+    display.printf(SW_NAME " v" SW_VERSION "\n");
     display.display();
 }
 
-void setup() {
-    ota_setup();
+#define DISPLAYP(x) {display.print(x);display.display();}
 
+void setup() {
+    oled_setup();
+    DISPLAYP("OTA-");
+    ota_setup();
     pinMode(LED_BUILTIN, OUTPUT);
     led_off();
+    DISPLAYP("NET-")
+    connect_wifi();    
+    log_print("\n\n***BOOTING APP***\n\n");
 
-    Serial.print("\n\nBOOTING APP\n\n");
-
-    oled_setup();
-
+    DISPLAYP("FS-")
     if(!LittleFS.begin()) {
-        Serial.println("LittleFS Mount Failed");
+        log_print("LittleFS Mount Failed");
         return;
     }
     listDir("/",1);
     
     log_printfln("BUILD: %s %s", __DATE__, __TIME__);
 
-    if (!LittleFS.exists(OWNER_FILENAME)) {
-        File owner_file = LittleFS.open(OWNER_FILENAME, "w");
-        owner_file.print(OWNER_CONTENT);
-        owner_file.close();
-        log_println("OWNER file written.");
-    } else {
-        log_println("OWNER file present.");
-    }
+    // if (!LittleFS.exists(OWNER_FILENAME)) {
+    //     File owner_file = LittleFS.open(OWNER_FILENAME, "w");
+    //     owner_file.print(OWNER_CONTENT);
+    //     owner_file.close();
+    //     log_println("OWNER file written.");
+    // } else {
+    //     log_println("OWNER file present.");
+    // }
 
-    if (LittleFS.exists(LAST_KNOWN_LOCATION)) {
-        log_println("LAST_KNOWN_LOCATION file present.");
-        File last_known_location_file = LittleFS.open(LAST_KNOWN_LOCATION, "r");
-        last_known_lat = last_known_location_file.readStringUntil('\n').toDouble();
-        last_known_lon = last_known_location_file.readStringUntil('\n').toDouble();
-        last_known_alt = last_known_location_file.readStringUntil('\n').toDouble();
-        last_known_location_file.close();
-        log_printfln("Last known location: lat:%.6f, lon:%.6f, alt:%.6f", last_known_lat, last_known_lon, last_known_alt);
-    }
+    // if (LittleFS.exists(LAST_KNOWN_LOCATION)) {
+    //     log_println("LAST_KNOWN_LOCATION file present.");
+    //     File last_known_location_file = LittleFS.open(LAST_KNOWN_LOCATION, "r");
+    //     last_known_lat = last_known_location_file.readStringUntil('\n').toDouble();
+    //     last_known_lon = last_known_location_file.readStringUntil('\n').toDouble();
+    //     last_known_alt = last_known_location_file.readStringUntil('\n').toDouble();
+    //     last_known_location_file.close();
+    //     log_printfln("Last known location: lat:%.6f, lon:%.6f, alt:%.6f", last_known_lat, last_known_lon, last_known_alt);
+    // }
 
     // if (LittleFS.exists(GPS_FILENAME)) {
     //     File gpsFile = LittleFS.open(GPS_FILENAME, "r");
@@ -108,6 +115,8 @@ void setup() {
     //     }
     // }
     // init_gps_file();
+
+    DISPLAYP("GPS-")
     uart_gps.begin(9600,SWSERIAL_8N1,12,13);
     log_println("GPS module connection started.");
     output_ticker.attach(GPS_LOG_INTERVAL, persist_location_record);
@@ -165,7 +174,6 @@ bool connect_wifi() {
     }
 
     log_printfln("Connecting to WiFi: %s ...", found_ssid);
-    Serial.flush();
 
     int tries = 50;
     while (WiFi.status() != WL_CONNECTED && tries > 0) {
@@ -180,8 +188,6 @@ bool connect_wifi() {
 
     log_print("Received IP: ");
     log_println(WiFi.localIP().toString());
-    Serial.flush();
-
     return true;
 }
 
@@ -192,6 +198,7 @@ double min_speed=0,max_speed=0,actual_speed=0;
 double min_alt=0,max_alt=0,actual_alt=0;
 
 void oled_update() {
+    if (!assistnow_initialized) return;
     unsigned long now = millis();
     if (now-last_oled_update>OLED_UPDATE_INTERVAL) {
         last_oled_update = now; 
@@ -201,11 +208,11 @@ void oled_update() {
         else display.print("S:-- ");
         if (gps.hdop.isValid()) display.printf("HDOP:%02.2f ",gps.hdop.hdop());
         else display.print("HDOP:--.-- ");
-        if (gps.location.isValid()) display.println("FIX  ");
-        else if (gps.location.isValid() && gps.altitude.isValid() && gps.speed.isValid()) display.println("3DFIX");
+        if (gps.location.isValid() && gps.altitude.isValid() && gps.speed.isValid()) display.println("3DFIX");
+        else if (gps.location.isValid()) display.println("  FIX");
         else display.println("NOFIX");
-        if (gps.date.isValid()) display.printf(" %04u-%02u-%02u-%02u:%02u:%02u\n",gps.date.year(),gps.date.month(),gps.date.day(),gps.time.hour(),gps.time.minute(),gps.time.second());
-        else display.println(" YYYY-MM-DD HH:MM:SS");
+        if (gps.date.isValid()) display.printf("%04u-%02u-%02u   %02u:%02u:%02u\n",gps.date.year(),gps.date.month(),gps.date.day(),gps.time.hour(),gps.time.minute(),gps.time.second());
+        else display.println("YYYY-MM-DD   HH:MM:SS");
         if (gps.speed.isValid()) {
             double actual_speed = gps.speed.kmph();
             min_speed=actual_speed<min_speed?actual_speed:min_speed;
@@ -226,18 +233,18 @@ void oled_update() {
 
 void loop() {
     if (uart_gps.available() > 0) {
-        check_serial_commands();
         int b = uart_gps.read();
         if (gps_debug) Serial.printf("%c", b);
         gps.encode(b);
     }
+    check_incoming_commands();
     if (!assistnow_initialized) init_assistnow();
     oled_update();
     ESP.wdtFeed();
     yield();
 }
 
-void check_serial_commands() {
+void check_incoming_commands() {
     if (Serial.available() > 0) {
         String command = Serial.readStringUntil('\n');
         command.trim();
@@ -325,10 +332,7 @@ void persist_location_record() {
 }
 
 void upload_gps_file() {
-    bool connected = connect_wifi();
-    if (!connected) {
-        return;
-    }
+    if (!connect_wifi()) return;
 
     log_printfln("Connecting to upload server at %s://%s:%d ...", (USE_SERVER_TLS ? "https" : "http"), UPLOAD_SERVER_HOST, UPLOAD_SERVER_PORT);
 
@@ -432,7 +436,7 @@ unsigned long epoch_from_filename(String filename) {
     return file_epoch;
 }
 
-void cleanup_outdated_assistnow_blobs(time_t epoch_time) {
+void cleanup_outdated_assistnow_blobs(time_t epoch_time, unsigned int *aFiles, unsigned int *bFiles) {
     fs::Dir dir = LittleFS.openDir("/");
     while (dir.next()) {
         if ((dir.fileName().startsWith("A-") or dir.fileName().startsWith("B-")) && dir.fileName().endsWith(".bin")) {
@@ -440,22 +444,39 @@ void cleanup_outdated_assistnow_blobs(time_t epoch_time) {
                 LittleFS.remove(dir.fileName());
                 continue;                
             }
+            else {
+                if (dir.fileName().startsWith("A-")) (*aFiles)++;
+                else (*bFiles)++;
+            }
+        }
+    }
+    dir.rewind();
+    while (dir.next()) {
+        if ((dir.fileName().startsWith("A-") or dir.fileName().startsWith("B-")) && dir.fileName().endsWith(".bin")) {
             unsigned int max_age = 0;
             if (dir.fileName().startsWith("A-")) {
-                max_age = 60 * 60 * 2; //2 hours
+                max_age = 60 * 60 * 2; //should be 2 hours
             } else if (dir.fileName().startsWith("B-")) {
-                max_age = 60 * 60 * 24; //24 hours
+                max_age = 60 * 60 * 24; //should be 24 hours
             } else {
                 LittleFS.remove(dir.fileName());
                 continue;
             }
             unsigned long file_epoch = epoch_from_filename(dir.fileName());
-            if (epoch_time - file_epoch > max_age) {
-                LittleFS.remove(dir.fileName());
-                log_printfln("AssistNow: deleted outdated blob: %s", dir.fileName().c_str());
-            } else {
-                log_printfln("AssistNow: keeping still valid blob: %s, %lu %lu %u", dir.fileName().c_str(), epoch_time, file_epoch, max_age);
-            }
+            if ((epoch_time - file_epoch > max_age) && (dir.fileName().startsWith("A-"))) {
+                if (*aFiles>1) {
+                    LittleFS.remove(dir.fileName());
+                    log_printfln("AssistNow: deleted outdated online blob: %s", dir.fileName().c_str());
+                    (*aFiles)--;
+                }
+            }          
+            if ((epoch_time - file_epoch > max_age) && (dir.fileName().startsWith("B-"))) {
+                if (*bFiles>1) {
+                    LittleFS.remove(dir.fileName());
+                    log_printfln("AssistNow: deleted outdated offline blob: %s", dir.fileName().c_str());
+                    (*bFiles)--;
+                }
+            }            
         }
     }
 }
@@ -500,15 +521,22 @@ void init_assistnow() {
         if (!connected) connect_failed = true;
     }
     if (!connect_failed) {
-        if (!timeIsValid) return;
+        if (!isTimeValid) return;
+        DISPLAYP("TIME-")
         time_t epoch_time = time(nullptr);
         struct tm *time_info = gmtime(&epoch_time);
-        cleanup_outdated_assistnow_blobs(epoch_time);
-        download_offline_blob(epoch_time, time_info);
-        download_online_blob(epoch_time, time_info);
+        DISPLAYP("CLN-");
+        unsigned int aFiles=0,bFiles=0;
+        cleanup_outdated_assistnow_blobs(epoch_time,&aFiles,&bFiles);
+        DISPLAYP("DOFF-");
+        if (aFiles==0) download_offline_blob(epoch_time, time_info);
+        DISPLAYP("DON-");
+        if (bFiles==0) download_online_blob(epoch_time, time_info);
     }
     String filename = find_valid_assistnow_blob();
+    DISPLAYP("ULD-")
     load_assistnow_blob(filename);
+    DISPLAYP("READY");
     WiFi.disconnect(true);
     assistnow_initialized = true;
 }

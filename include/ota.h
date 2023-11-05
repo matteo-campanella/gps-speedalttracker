@@ -3,3 +3,5 @@
 #include <ESP8266WiFi.h>
 
 void ota_setup();
+
+#define hostString "gpstracker"
