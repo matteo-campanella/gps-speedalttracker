@@ -40,6 +40,7 @@ void udpBroadcast(char *);
 #define GPS_FILENAME "GPS.TXT"
 #define GPS_COLUMN_HEADERS "timestamp;latitude;longitude;altitude;speed;sats"
 #define GPS_LOG_INTERVAL 1
+#define TICK_INTERVAL 0.1
 #define SSD1306_NO_SPLASH 
 #define UDP_LISTEN_PORT 8081
 #define UDP_BROADCAST_PORT 8081

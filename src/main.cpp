@@ -1,8 +1,10 @@
 #include "main.h"
 #include "ota.h"
 
-#define led_on() digitalWrite(LED_BUILTIN, LOW);
-#define led_off() digitalWrite(LED_BUILTIN, HIGH);
+#define LED_ON digitalWrite(LED_BUILTIN, LOW)
+#define LED_OFF digitalWrite(LED_BUILTIN, HIGH)
+#define IS_LED_ON digitalRead(LED_BUILTIN)==LOW?true:false
+#define BLINK_LED if (IS_LED_ON) {LED_OFF;} else {LED_ON;}
 
 void listDir(const char * dirname, uint8_t levels) {
     log_printf("Listing directory: %s\r\n", dirname);
@@ -29,13 +31,10 @@ void listDir(const char * dirname, uint8_t levels) {
 int no_gps_lock_counter = 0;
 int no_location_update_counter = 0;
 bool gps_debug = false;
-bool blinker_state = false;
-bool first_location_record = true;
-bool assistnow_initialized = false;
 Ticker output_ticker;
 SoftwareSerial uart_gps;
 TinyGPSPlus gps;
-Adafruit_SSD1306 display = Adafruit_SSD1306(128, 32, &Wire, -1);
+Adafruit_SSD1306 display = Adafruit_SSD1306(128, 64, &Wire, -1);
 double old_lat;
 double old_lon;
 WiFiUDP udp;
@@ -52,6 +51,7 @@ void udpBroadcast(const char *message) {
 }
 
 void oled_setup() {
+    Wire.begin(14,12);
     display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
     display.clearDisplay();
     display.setTextSize(1);      // Normal 1:1 pixel scale
@@ -69,7 +69,7 @@ void setup() {
     DISPLAYP("OTA-");
     ota_setup();
     pinMode(LED_BUILTIN, OUTPUT);
-    led_off();
+    LED_OFF;
     DISPLAYP("NET-")
     connect_wifi();    
     log_print("\n\n***BOOTING APP***\n\n");
@@ -117,9 +117,9 @@ void setup() {
     // init_gps_file();
 
     DISPLAYP("GPS-")
-    uart_gps.begin(9600,SWSERIAL_8N1,12,13);
+    uart_gps.begin(9600,SWSERIAL_8N1,5,4);
     log_println("GPS module connection started.");
-    output_ticker.attach(GPS_LOG_INTERVAL, persist_location_record);
+    output_ticker.attach(TICK_INTERVAL, persist_location_record);
 }
 
 void init_gps_file() {
@@ -198,7 +198,6 @@ double min_speed=0,max_speed=0,actual_speed=0;
 double min_alt=0,max_alt=0,actual_alt=0;
 
 void oled_update() {
-    if (!assistnow_initialized) return;
     unsigned long now = millis();
     if (now-last_oled_update>OLED_UPDATE_INTERVAL) {
         last_oled_update = now; 
@@ -238,7 +237,6 @@ void loop() {
         gps.encode(b);
     }
     check_incoming_commands();
-    if (!assistnow_initialized) init_assistnow();
     oled_update();
     ESP.wdtFeed();
     yield();
@@ -263,72 +261,74 @@ void check_incoming_commands() {
 
 void persist_location_record() {
     static size_t tick_counter = 0;
+    bool isLocationValid = gps.location.isValid();
+    bool isLocationUpdated = gps.location.isUpdated();
+    
     tick_counter++;
 
-    if (blinker_state) {
-        blinker_state = false;
-        led_off();
-    } else {
-        blinker_state = true;
-        led_on();
+    if (isLocationValid) {
+        if (tick_counter % int(1/TICK_INTERVAL) == 0) { BLINK_LED }
+    }
+    else {
+        BLINK_LED
     }
 
-    if (!gps.location.isValid()) {
-        if (no_gps_lock_counter++ % int(60.0 / GPS_LOG_INTERVAL) == 0) {
-            led_off();
-            log_printfln(TIMESTAMP_FORMAT ": No GPS lock: %u satellites.",
-                         TIMESTAMP_ARGS,
-                         gps.satellites.value());
+    if (tick_counter % int(GPS_LOG_INTERVAL / TICK_INTERVAL) == 0) { //do checks every 1 second
+        if (!isLocationValid) {
+            if (no_gps_lock_counter++ % int(60.0 / GPS_LOG_INTERVAL) == 0) {
+                log_printfln(TIMESTAMP_FORMAT ": No GPS lock: %u satellites.",
+                            TIMESTAMP_ARGS,
+                            gps.satellites.value());
+            }
+            return;
         }
-        return;
-    }
-    no_gps_lock_counter = 0;
+        no_gps_lock_counter = 0;
 
-    if (!gps.location.isUpdated()) {
-        if (no_location_update_counter++ % int(60.0 / GPS_LOG_INTERVAL) == 0) {
-            log_printfln(TIMESTAMP_FORMAT ": Last GPS location update was %.0f seconds ago.",
-                         TIMESTAMP_ARGS,
-                         gps.location.age() / 1000.0);
+        if (!isLocationUpdated) {
+            if (no_location_update_counter++ % int(60.0 / GPS_LOG_INTERVAL) == 0) {
+                log_printfln(TIMESTAMP_FORMAT ": Last GPS location update was %.0f seconds ago.",
+                            TIMESTAMP_ARGS,
+                            gps.location.age() / 1000.0);
+            }
+            return;
         }
-        return;
+        no_location_update_counter = 0;
+
+        double new_lat = gps.location.lat();
+        double new_lon = gps.location.lng();
+        double distance_travelled = gps.distanceBetween(old_lat, old_lon, new_lat, new_lon);
+        if (distance_travelled < 5.0) {
+            log_printfln(TIMESTAMP_FORMAT ": Only travelled %.2f meters since last update - skipping.",
+                        TIMESTAMP_ARGS,
+                        distance_travelled);
+            return;
+        } else {
+            old_lat = new_lat;
+            old_lon = new_lon;
+        }
+
+        char record[80];
+        snprintf(record, sizeof(record), TIMESTAMP_FORMAT ";%.6f;%.6f;%.2f;%.2f;%d",
+                TIMESTAMP_ARGS,
+                new_lat, new_lon, gps.altitude.meters(), gps.speed.mps(), gps.satellites.value());
+
+        // File gpsFile = LittleFS.open(GPS_FILENAME, "a");
+        // gpsFile.println(record);
+        // gpsFile.close();
+
+        // if (tick_counter % (300 / TICK_INTERVAL) == 0) {
+        //     File last_known_location_file = LittleFS.open(LAST_KNOWN_LOCATION, "w");
+        //     snprintf(record, sizeof(record), "%.6f", last_known_lat);
+        //     last_known_location_file.println(record);
+        //     snprintf(record, sizeof(record), "%.6f", last_known_lon);
+        //     last_known_location_file.println(record);
+        //     snprintf(record, sizeof(record), "%.6f", last_known_alt);
+        //     last_known_location_file.println(record);
+        //     last_known_location_file.close();
+        // }
+
+        Serial.println(record);
     }
-    no_location_update_counter = 0;
-
-    double new_lat = gps.location.lat();
-    double new_lon = gps.location.lng();
-    // double distance_travelled = gps.distanceBetween(old_lat, old_lon, new_lat, new_lon);
-    // if (distance_travelled < 5.0) {
-    //     log_printfln(TIMESTAMP_FORMAT ": Only travelled %.2f meters since last update - skipping.",
-    //                  TIMESTAMP_ARGS,
-    //                  distance_travelled);
-    //     return;
-    // } else {
-        old_lat = new_lat;
-        old_lon = new_lon;
-    //}
-
-    char record[80];
-    snprintf(record, sizeof(record), TIMESTAMP_FORMAT ";%.6f;%.6f;%.2f;%.2f;%d",
-             TIMESTAMP_ARGS,
-             new_lat, new_lon, gps.altitude.meters(), gps.speed.mps(), gps.satellites.value());
-
-    // File gpsFile = LittleFS.open(GPS_FILENAME, "a");
-    // gpsFile.println(record);
-    // gpsFile.close();
-
-    if (tick_counter % (300 / GPS_LOG_INTERVAL) == 0) {
-        File last_known_location_file = LittleFS.open(LAST_KNOWN_LOCATION, "w");
-        snprintf(record, sizeof(record), "%.6f", last_known_lat);
-        last_known_location_file.println(record);
-        snprintf(record, sizeof(record), "%.6f", last_known_lon);
-        last_known_location_file.println(record);
-        snprintf(record, sizeof(record), "%.6f", last_known_alt);
-        last_known_location_file.println(record);
-        last_known_location_file.close();
-    }
-
-    // do not use log_print helpers here, only log to Serial and the GPS file, but not to LOG file
-    Serial.println(record);
 }
 
 void upload_gps_file() {
@@ -377,233 +377,4 @@ void upload_gps_file() {
     }
 
     return;
-}
-
-bool download_file_to_sd(char *url, char *filename) {
-    log_printfln("AssistNow: downloading from %s into %s ...", url, filename);
-    File file = LittleFS.open(filename, "w");
-
-    WiFiClient client;
-    HTTPClient http;
-    http.begin(client, url);
-    http.useHTTP10();
-    int http_code = http.GET();
-    if (http_code != HTTP_CODE_OK) {
-        log_printfln("AssistNow: error downloading blob: %d", http_code);
-        LittleFS.remove(filename);
-        return false;
-    }
-    log_println("AssistNow: GET request successful. Downloading payload data...");
-
-    bool error = false;
-    uint8_t buf[128];
-    int pos = 0;
-    while (pos < http.getSize()) {
-        size_t read_len = client.read(buf, sizeof(buf));
-        if (read_len < 0) {
-            log_println("AssistNow: error reading from HTTP");
-            error = true;
-            break;
-        }
-        size_t write_len = file.write(buf, read_len);
-        if (write_len != read_len) {
-            log_printfln("AssistNow: error writing to file: written only %d bytes out of %d in the read buffer.", write_len, read_len);
-            error = true;
-            break;
-        }
-        pos += read_len;
-        yield();
-    }
-    file.flush();
-    file.close();
-    http.end();
-
-    if (error) {
-        LittleFS.remove(filename);
-        return false;
-    }
-
-    file = LittleFS.open(filename, "r");
-    log_printfln("AssistNow: download completed with %d bytes.", file.size());
-    file.close();
-    return true;
-}
-
-unsigned long epoch_from_filename(String filename) {
-    if (!filename.startsWith("A-") && !filename.startsWith("B-")) return 0;
-    String file_epoch_str = filename.substring(2, 12);
-    unsigned long file_epoch = atol(file_epoch_str.c_str());
-    return file_epoch;
-}
-
-void cleanup_outdated_assistnow_blobs(time_t epoch_time, unsigned int *aFiles, unsigned int *bFiles) {
-    fs::Dir dir = LittleFS.openDir("/");
-    while (dir.next()) {
-        if ((dir.fileName().startsWith("A-") or dir.fileName().startsWith("B-")) && dir.fileName().endsWith(".bin")) {
-            if (dir.fileSize() == 0) {
-                LittleFS.remove(dir.fileName());
-                continue;                
-            }
-            else {
-                if (dir.fileName().startsWith("A-")) (*aFiles)++;
-                else (*bFiles)++;
-            }
-        }
-    }
-    dir.rewind();
-    while (dir.next()) {
-        if ((dir.fileName().startsWith("A-") or dir.fileName().startsWith("B-")) && dir.fileName().endsWith(".bin")) {
-            unsigned int max_age = 0;
-            if (dir.fileName().startsWith("A-")) {
-                max_age = 60 * 60 * 2; //should be 2 hours
-            } else if (dir.fileName().startsWith("B-")) {
-                max_age = 60 * 60 * 24; //should be 24 hours
-            } else {
-                LittleFS.remove(dir.fileName());
-                continue;
-            }
-            unsigned long file_epoch = epoch_from_filename(dir.fileName());
-            if ((epoch_time - file_epoch > max_age) && (dir.fileName().startsWith("A-"))) {
-                if (*aFiles>1) {
-                    LittleFS.remove(dir.fileName());
-                    log_printfln("AssistNow: deleted outdated online blob: %s", dir.fileName().c_str());
-                    (*aFiles)--;
-                }
-            }          
-            if ((epoch_time - file_epoch > max_age) && (dir.fileName().startsWith("B-"))) {
-                if (*bFiles>1) {
-                    LittleFS.remove(dir.fileName());
-                    log_printfln("AssistNow: deleted outdated offline blob: %s", dir.fileName().c_str());
-                    (*bFiles)--;
-                }
-            }            
-        }
-    }
-}
-
-String find_valid_assistnow_blob() {
-    String best_match = "";
-    time_t best_epoch = 0;
-
-    fs::Dir dir = LittleFS.openDir("/");
-    while (dir.next()) {
-        if (dir.fileName().startsWith("A-")) {
-            long file_epoch = epoch_from_filename(dir.fileName());
-            if (file_epoch > best_epoch) {
-                best_epoch = file_epoch;
-                best_match = dir.fileName();
-            }
-        }
-    }
-    if (best_epoch > 0) {
-        // prefer ONLINE blobs over OFFLINE blobs
-        return best_match;
-    }
-    dir = LittleFS.openDir("/");
-    while (dir.next()) {
-        if (dir.fileName().startsWith("B-")) {
-            long file_epoch = epoch_from_filename(dir.fileName());
-            if (file_epoch > best_epoch) {
-                best_epoch = file_epoch;
-                best_match = dir.fileName();
-            }
-        }
-    }
-    return best_match;
-}
-
-bool connected = false;
-bool connect_failed = false;
-
-void init_assistnow() {
-    if (!connected && !connect_failed) {
-        connected = connect_wifi();
-        if (!connected) connect_failed = true;
-    }
-    if (!connect_failed) {
-        if (!isTimeValid) return;
-        DISPLAYP("TIME-")
-        time_t epoch_time = time(nullptr);
-        struct tm *time_info = gmtime(&epoch_time);
-        DISPLAYP("CLN-");
-        unsigned int aFiles=0,bFiles=0;
-        cleanup_outdated_assistnow_blobs(epoch_time,&aFiles,&bFiles);
-        DISPLAYP("DOFF-");
-        if (aFiles==0) download_offline_blob(epoch_time, time_info);
-        DISPLAYP("DON-");
-        if (bFiles==0) download_online_blob(epoch_time, time_info);
-    }
-    String filename = find_valid_assistnow_blob();
-    DISPLAYP("ULD-")
-    load_assistnow_blob(filename);
-    DISPLAYP("READY");
-    WiFi.disconnect(true);
-    assistnow_initialized = true;
-}
-
-bool download_online_blob(time_t epoch_time, struct tm *time_info) {
-    char online_filename[60];
-    snprintf(online_filename, sizeof(online_filename), "A-%llu-%d%02d%02d%02d%02d%02d.bin",
-             epoch_time,
-             time_info->tm_year + 1900,
-             time_info->tm_mon + 1,
-             time_info->tm_mday,
-             time_info->tm_hour,
-             time_info->tm_min,
-             time_info->tm_sec);
-    char url[200];
-    snprintf(url, sizeof(url), "%s?token=%s;gnss=gps,glo,gal;datatype=eph,alm,aux,pos;lat=%.6f;lon=%.6f;alt=%.2f;pacc=50000;latency=1",
-             ASSISTNOW_ONLINE_BASE_URL,
-             ASSISTNOW_TOKEN,
-             last_known_lat,
-             last_known_lon,
-             last_known_alt);
-    return download_file_to_sd(url, online_filename);
-}
-
-bool download_offline_blob(time_t epoch_time, struct tm *time_info) {
-    char offline_filename[60];
-    snprintf(offline_filename, sizeof(offline_filename), "B-%llu-%d%02d%02d%02d%02d%02d.bin",
-             epoch_time,
-             time_info->tm_year + 1900,
-             time_info->tm_mon + 1,
-             time_info->tm_mday,
-             time_info->tm_hour,
-             time_info->tm_min,
-             time_info->tm_sec);
-
-    // adding the almanac parameter causes an error, see https://portal.u-blox.com/s/question/0D52p00009in3mk/offline-assistnow-almanac-url
-    char url[170];
-    snprintf(url, sizeof(url), "%s?gnss=gps,glo;format=mga;period=5;resolution=1;token=%s",
-             ASSISTNOW_OFFLINE_BASE_URL,
-             ASSISTNOW_TOKEN);
-    return download_file_to_sd(url, offline_filename);
-}
-
-void load_assistnow_blob(String filename) {
-    if (filename.length() == 0) {
-        return;
-    }
-
-    log_printfln("AssistNow: uploading blob %s to module...", filename.c_str());
-    File file = LittleFS.open(filename, "r");
-    size_t size = file.size();
-    if (size <= 0) {
-        log_println("AssistNow: blob file with invalid size. Skipping loading it.");
-        return;
-    }
-
-    uint8_t buf[128];
-    size_t pos = 0;
-    while (pos < size) {
-        int read_len = file.read(buf, sizeof(buf));
-        if (read_len < 0) {
-            log_println("AssistNow: file read error");
-            return;
-        }
-        uart_gps.write(buf, read_len);
-        pos += read_len;
-    }
-    file.close();
-    log_println("AssistNow: upload to module completed.");
 }

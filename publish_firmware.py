@@ -41,7 +41,7 @@ def publish_firmware(source, target, env):
     scp.close()
     ssh.close()
 
-    os.remove(firmware_path)
+    #os.remove(firmware_path)
 
     # url = "/".join([
     #     "https://api.bintray.com", "content",
