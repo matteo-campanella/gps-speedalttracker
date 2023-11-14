@@ -6,6 +6,12 @@
 #define IS_LED_ON digitalRead(LED_BUILTIN)==LOW?true:false
 #define BLINK_LED if (IS_LED_ON) {LED_OFF;} else {LED_ON;}
 
+unsigned long last_oled_update = 0;
+#define OLED_UPDATE_INTERVAL 500L
+
+double min_speed=0,max_speed=0,actual_speed=0;
+double min_alt=0,max_alt=0,actual_alt=0;
+
 void listDir(const char * dirname, uint8_t levels) {
     log_printf("Listing directory: %s\r\n", dirname);
 
@@ -13,16 +19,16 @@ void listDir(const char * dirname, uint8_t levels) {
     while (root.next()) {
         File file = root.openFile("r");
         if (file.isDirectory()) {
-            log_print("  DIR : ");
+            log_print("DIR:");
             log_println(file.name());
             if(levels) {
                 listDir(file.fullName(), levels - 1);
             }
             file.close();
         } else {
-            log_print("  FILE: ");
+            log_print("FILE:");
             log_print(file.name());
-            log_print("\t\t\tSIZE: ");
+            log_print("\tSIZE:");
             log_printfln("%d",file.size());
         }
     }
@@ -44,6 +50,7 @@ double last_known_lon = ASSISTNOW_START_LON;
 double last_known_alt = ASSISTNOW_START_ALT;
 
 void udpBroadcast(const char *message) {
+    if (!WiFi.isConnected()) return;
     if (udp.beginPacket(WiFi.broadcastIP(),UDP_BROADCAST_PORT)) {
         udp.write(message);
         udp.endPacket();
@@ -71,7 +78,8 @@ void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     LED_OFF;
     DISPLAYP("NET-")
-    connect_wifi();    
+    time_setup();
+    wifi_connect();    
     log_print("\n\n***BOOTING APP***\n\n");
 
     DISPLAYP("FS-")
@@ -80,7 +88,6 @@ void setup() {
         return;
     }
     listDir("/",1);
-    
     log_printfln("BUILD: %s %s", __DATE__, __TIME__);
 
     // if (!LittleFS.exists(OWNER_FILENAME)) {
@@ -139,13 +146,15 @@ void timeIsValid() {
     log_println("System time has been set.");
 }
 
-bool connect_wifi() {
-    const char *found_ssid = NULL;
-    int n = 0;
-
+void time_setup() {
     settimeofday_cb(timeIsValid);
     sntp_servermode_dhcp(0);
     configTime(TZ_Etc_UTC, "pool.ntp.org", "time.nist.gov", "ntp1.inrim.it");
+}
+
+bool wifi_connect() {
+    const char *found_ssid = NULL;
+    int n = 0;
 
     for (int i = 0; i < 3; i++) {
         n = WiFi.scanNetworks();
@@ -170,11 +179,12 @@ bool connect_wifi() {
 
     if (found_ssid == NULL) {
         log_println("No known WiFi found.");
+        WiFi.mode(WIFI_OFF);
         return false;
     }
 
     log_printfln("Connecting to WiFi: %s ...", found_ssid);
-
+    WiFi.mode(WIFI_STA);
     int tries = 50;
     while (WiFi.status() != WL_CONNECTED && tries > 0) {
         delay(250);
@@ -182,20 +192,14 @@ bool connect_wifi() {
     }
     if (tries == 0) {
         log_println("Failed to connect to WiFi!");
+        WiFi.mode(WIFI_OFF);
         return false;
     }
-    WiFi.mode(WIFI_STA);
-
-    log_print("Received IP: ");
+    
+    log_print("IP: ");
     log_println(WiFi.localIP().toString());
     return true;
 }
-
-unsigned long last_oled_update = 0;
-#define OLED_UPDATE_INTERVAL 500L
-
-double min_speed=0,max_speed=0,actual_speed=0;
-double min_alt=0,max_alt=0,actual_alt=0;
 
 void oled_update() {
     unsigned long now = millis();
@@ -203,29 +207,29 @@ void oled_update() {
         last_oled_update = now; 
         display.clearDisplay();
         display.setCursor(0,0);
+        display.setTextSize(1);
         if (gps.satellites.isValid()) display.printf("S:%02u ",gps.satellites.value());
         else display.print("S:-- ");
-        if (gps.hdop.isValid()) display.printf("HDOP:%02.2f ",gps.hdop.hdop());
+        if (gps.hdop.isValid()) display.printf("HDOP:%05.2f ",gps.hdop.hdop());
         else display.print("HDOP:--.-- ");
         if (gps.location.isValid() && gps.altitude.isValid() && gps.speed.isValid()) display.println("3DFIX");
         else if (gps.location.isValid()) display.println("  FIX");
         else display.println("NOFIX");
         if (gps.date.isValid()) display.printf("%04u-%02u-%02u   %02u:%02u:%02u\n",gps.date.year(),gps.date.month(),gps.date.day(),gps.time.hour(),gps.time.minute(),gps.time.second());
         else display.println("YYYY-MM-DD   HH:MM:SS");
+        display.setTextSize(2);
         if (gps.speed.isValid()) {
             double actual_speed = gps.speed.kmph();
             min_speed=actual_speed<min_speed?actual_speed:min_speed;
             max_speed=actual_speed>max_speed?actual_speed:max_speed;
-            display.printf("S%06.2f %06.2f %06.2f\n",min_speed,actual_speed,max_speed);
+            display.printf("%06.2f km/h\n",max_speed);
         }
-        else display.printf("S%06.2f ---.-- %06.2f\n",min_speed,max_speed);
         if (gps.altitude.isValid()) {
             double actual_alt = gps.altitude.meters();
             min_alt=actual_alt<min_alt?actual_alt:min_alt;
             max_alt=actual_alt>max_alt?actual_alt:max_alt;
-            display.printf("A%06.1f %06.1f %06.1f",min_alt,actual_alt,max_alt);
+            display.printf("%06.1f m",max_alt);
         }
-        else display.printf("A%06.1f ----.- %06.1f",min_alt,max_alt);        
         display.display();
     }
 }
@@ -315,6 +319,7 @@ void persist_location_record() {
         // File gpsFile = LittleFS.open(GPS_FILENAME, "a");
         // gpsFile.println(record);
         // gpsFile.close();
+        udpBroadcast(record);
 
         // if (tick_counter % (300 / TICK_INTERVAL) == 0) {
         //     File last_known_location_file = LittleFS.open(LAST_KNOWN_LOCATION, "w");
@@ -332,8 +337,7 @@ void persist_location_record() {
 }
 
 void upload_gps_file() {
-    if (!connect_wifi()) return;
-
+    if (!WiFi.isConnected()) return;
     log_printfln("Connecting to upload server at %s://%s:%d ...", (USE_SERVER_TLS ? "https" : "http"), UPLOAD_SERVER_HOST, UPLOAD_SERVER_PORT);
 
 #if USE_SERVER_TLS
